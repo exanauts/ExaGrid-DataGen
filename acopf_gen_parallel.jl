@@ -6,10 +6,12 @@ addprocs(5)
 
 @everywhere begin
     using PowerModels
-    using Ipopt
     using JuMP
     using Random
     using HDF5
+    # using Ipopt
+    using MadNLP
+    using MadNLPHSL
     
     include("acopf_model.jl")
     include("perturbations.jl")
@@ -29,7 +31,12 @@ addprocs(5)
             )
         )
         
-        JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+        # Ipopt + HSL
+        # JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+        # MadNLP + HSL
+        JuMP.set_optimizer(pm.model, MadNLP.Optimizer)
+        JuMP.set_optimizer_attribute(pm.model, "linear_solver", Ma27Solver)
+        JuMP.set_optimizer_attribute(pm.model, "print_level", MadNLP.INFO)
         
         result = optimize_model!(pm)
 

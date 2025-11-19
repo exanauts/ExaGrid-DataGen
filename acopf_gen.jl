@@ -1,6 +1,9 @@
 using PowerModels
-using Ipopt
+# using Ipopt
 using JuMP
+
+using MadNLP
+using MadNLPHSL
 
 include("acopf_model.jl")
 include("perturbations.jl")
@@ -17,7 +20,12 @@ pm = instantiate_model(network, ACPPowerModel,
     )
 )
 
-JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+# Ipopt + HSL
+# JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+# MadNLP + HSL
+JuMP.set_optimizer(pm.model, MadNLP.Optimizer)
+JuMP.set_optimizer_attribute(pm.model, "linear_solver", Ma27Solver)
+JuMP.set_optimizer_attribute(pm.model, "print_level", MadNLP.INFO)
 result = optimize_model!(pm)
 
 println("Objective value: $(result["objective"])")
