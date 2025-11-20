@@ -1,6 +1,10 @@
+using Pkg.Artifacts
 using PowerModels
 # using Ipopt
 using JuMP
+using MadNLPHSL, MadNLPGPU
+
+pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
 
 using MadNLP
 using MadNLPHSL
@@ -9,7 +13,22 @@ include("acopf_model.jl")
 include("perturbations.jl")
 include("hdf5_writer.jl")
 
-network = PowerModels.parse_file("./grids/pglib_opf_case24_ieee_rts.m")
+# Solver selection: default is :madnlp. Override with ARGS[1] or ENV["OPF_SOLVER"].
+function _choose_solver(default::Symbol=:madnlp)
+    arg = isempty(ARGS) ? get(ENV, "OPF_SOLVER", "") : ARGS[1]
+    if arg == "" || arg === nothing
+        return default
+    end
+    s = Symbol(lowercase(arg))
+    if s in (:madnlp, :madnlpgpu, :ipopt)
+        return s
+    end
+    error("Unknown solver: $arg. Allowed values: ipopt, madnlp")
+end
+
+const SOLVER = _choose_solver(:madnlp)
+
+network = PowerModels.parse_file(joinpath(pglib_path, "pglib_opf_case24_ieee_rts.m"))
 perturb_loads_separate!(network, (0.9, 1.1), (0.9, 1.1), 230)
 power_balance_relaxation = false
 line_limit_relaxation = false
@@ -20,12 +39,15 @@ pm = instantiate_model(network, ACPPowerModel,
     )
 )
 
-# Ipopt + HSL
-# JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
-# MadNLP + HSL
-JuMP.set_optimizer(pm.model, MadNLP.Optimizer)
-JuMP.set_optimizer_attribute(pm.model, "linear_solver", Ma27Solver)
-JuMP.set_optimizer_attribute(pm.model, "print_level", MadNLP.INFO)
+if SOLVER == :madnlp
+    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+elseif SOLVER == :madnlpgpu
+    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=CUDSSSolver))
+elseif SOLVER == :ipopt
+    JuMP.set_optimizer(pm.model, ()->Ipopt.Optimizer())
+else
+    error("Unsupported solver: $SOLVER")
+end
 result = optimize_model!(pm)
 
 println("Objective value: $(result["objective"])")

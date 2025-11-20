@@ -1,22 +1,49 @@
+using Pkg.Artifacts
 using Distributed
 using ProgressMeter
 using HDF5
 
 addprocs(5)
 
+pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
+
+
+# Push configuration and required imports to worker processes
 @everywhere begin
+
+    # Solver selection: default is :madnlp. Override with ARGS[1] or ENV["OPF_SOLVER"].
+    function _choose_solver(default::Symbol=:madnlp)
+        arg = isempty(ARGS) ? get(ENV, "OPF_SOLVER", "") : ARGS[1]
+        if arg == "" || arg === nothing
+            return default
+        end
+        s = Symbol(lowercase(arg))
+        if s in (:madnlp, :madnlpgpu, :ipopt)
+            return s
+        end
+        error("Unknown solver: $arg. Allowed values: ipopt, madnlp")
+    end
+
+    function _choose_instance(default::String="pglib_opf_case24_ieee_rts")
+        val = length(ARGS) >= 2 ? ARGS[2] : get(ENV, "OPF_INSTANCE", "")
+        return val == "" ? default : String(val)
+    end
+
+    const INSTANCE = _choose_instance("pglib_opf_case24_ieee_rts")
+    const SOLVER = _choose_solver(:madnlp)
+
+    # global INSTANCE = $INSTANCE
+    # global pglib_path = $pglib_path
+    using MadNLP
+    using MadNLPHSL
     using PowerModels
     using JuMP
     using Random
     using HDF5
-    # using Ipopt
-    using MadNLP
-    using MadNLPHSL
-    
     include("acopf_model.jl")
     include("perturbations.jl")
     include("hdf5_writer.jl")
-    
+
     function solve_scenario(base_network, scenario_id, p_range, q_range)
         power_balance_relaxation = false
         line_limit_relaxation = false
@@ -30,13 +57,14 @@ addprocs(5)
                 line_limit_relaxation=false
             )
         )
-        
-        # Ipopt + HSL
-        # JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
-        # MadNLP + HSL
-        JuMP.set_optimizer(pm.model, MadNLP.Optimizer)
-        JuMP.set_optimizer_attribute(pm.model, "linear_solver", Ma27Solver)
-        JuMP.set_optimizer_attribute(pm.model, "print_level", MadNLP.INFO)
+
+        if SOLVER == :ipopt
+            JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+        elseif SOLVER == :madnlp
+            JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+        else
+            error("Unsupported solver on worker: $(SOLVER)")
+        end
         
         result = optimize_model!(pm)
 
@@ -51,7 +79,13 @@ addprocs(5)
             power_balance_relaxation = true
             line_limit_relaxation = true
 
-            JuMP.set_optimizer(pm.model, Ipopt.Optimizer)       
+            if SOLVER == :ipopt
+                JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
+            elseif SOLVER == :madnlp
+                JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+            else
+                error("Unsupported solver on worker: $(SOLVER)")
+            end
             result = optimize_model!(pm)
 
             if result["termination_status"] != MOI.LOCALLY_SOLVED
@@ -91,10 +125,10 @@ addprocs(5)
 end
 
 # Configuration
-case_file = "./grids/pglib_opf_case30_as.m"
-n_scenarios = 2000
-chunk_size = 200
-output_dir = "results/case30"
+case_file = joinpath(pglib_path, "$(INSTANCE).m")
+n_scenarios = 10
+chunk_size = 2
+output_dir = "results/$(INSTANCE)"
 p_range = (0.9, 1.1)
 q_range = (0.9, 1.1)
 
