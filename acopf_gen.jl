@@ -40,9 +40,9 @@ pm = instantiate_model(network, ACPPowerModel,
 )
 
 if SOLVER == :madnlp
-    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.INFO))
 elseif SOLVER == :madnlpgpu
-    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=CUDSSSolver))
+    JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=CUDSSSolver, print_level=MadNLP.INFO))
 elseif SOLVER == :ipopt
     JuMP.set_optimizer(pm.model, ()->Ipopt.Optimizer())
 else

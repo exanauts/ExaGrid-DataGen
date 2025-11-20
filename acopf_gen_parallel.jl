@@ -61,7 +61,7 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
         if SOLVER == :ipopt
             JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
         elseif SOLVER == :madnlp
-            JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+            JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.INFO))
         else
             error("Unsupported solver on worker: $(SOLVER)")
         end
@@ -82,7 +82,7 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
             if SOLVER == :ipopt
                 JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
             elseif SOLVER == :madnlp
-                JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver))
+                JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.INFO))
             else
                 error("Unsupported solver on worker: $(SOLVER)")
             end
