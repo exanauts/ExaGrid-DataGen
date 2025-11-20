@@ -1,34 +1,51 @@
 using Pkg.Artifacts
 using PowerModels
-# using Ipopt
+using Ipopt
 using JuMP
-using MadNLPHSL, MadNLPGPU
+using MadNLP, MadNLPHSL, MadNLPGPU
+using ArgParse
+
+# Parse CLI options at top-level so we can call addprocs with the requested count
+function parse_cli()
+    s = ArgParseSettings()
+    @add_arg_table s begin
+        "--solver"
+            help = "Solver to use: ipopt, madnlp"
+            arg_type = String
+            default = "madnlp"
+        "--instance"
+            help = "PGLib instance name (without .m)"
+            arg_type = String
+            default = "pglib_opf_case24_ieee_rts"
+        "--write_output"
+            help = "Whether to write output to HDF5 file"
+            arg_type = Bool
+            default = false
+    end
+
+    parsed = parse_args(s)
+
+    opts = Dict{Symbol,Any}()
+    opts[:solver] = Symbol(lowercase(parsed["solver"]))
+    opts[:instance] = parsed["instance"]
+    opts[:write_output] = parsed["write_output"]
+
+    return opts
+end
+
+opts = parse_cli()
 
 pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
-
-using MadNLP
-using MadNLPHSL
 
 include("acopf_model.jl")
 include("perturbations.jl")
 include("hdf5_writer.jl")
 
-# Solver selection: default is :madnlp. Override with ARGS[1] or ENV["OPF_SOLVER"].
-function _choose_solver(default::Symbol=:madnlp)
-    arg = isempty(ARGS) ? get(ENV, "OPF_SOLVER", "") : ARGS[1]
-    if arg == "" || arg === nothing
-        return default
-    end
-    s = Symbol(lowercase(arg))
-    if s in (:madnlp, :madnlpgpu, :ipopt)
-        return s
-    end
-    error("Unknown solver: $arg. Allowed values: ipopt, madnlp")
-end
+const SOLVER = opts[:solver]
+const INSTANCE = opts[:instance]
 
-const SOLVER = _choose_solver(:madnlp)
-
-network = PowerModels.parse_file(joinpath(pglib_path, "pglib_opf_case24_ieee_rts.m"))
+PowerModels.silence()
+network = PowerModels.parse_file(joinpath(pglib_path, "$(INSTANCE).m"))
 perturb_loads_separate!(network, (0.9, 1.1), (0.9, 1.1), 230)
 power_balance_relaxation = false
 line_limit_relaxation = false
@@ -48,35 +65,40 @@ elseif SOLVER == :ipopt
 else
     error("Unsupported solver: $SOLVER")
 end
-result = optimize_model!(pm)
 
-println("Objective value: $(result["objective"])")
+try
+    result = optimize_model!(pm)
 
-total_power_slack = 0.0
-total_line_slack = 0.0 
+    println("$SOLVER [$(result["termination_status"])]: $INSTANCE with objective value $(result["objective"])")
 
-if power_balance_relaxation == true
-    for (i, bus) in result["solution"]["bus"]
-        if haskey(bus, "p_slack_pos")
-            total_power_slack += bus["p_slack_pos"] + bus["p_slack_neg"] + bus["q_slack_pos"] + bus["q_slack_neg"]
+    total_power_slack = 0.0
+    total_line_slack = 0.0 
+
+    if power_balance_relaxation == true
+        for (i, bus) in result["solution"]["bus"]
+            if haskey(bus, "p_slack_pos")
+                total_power_slack += bus["p_slack_pos"] + bus["p_slack_neg"] + bus["q_slack_pos"] + bus["q_slack_neg"]
+            end
         end
+        println("Total power balance slack: $(total_power_slack)")
     end
-    println("Total power balance slack: $(total_power_slack)")
-end
- 
-if line_limit_relaxation == true
-    for (i, branch) in result["solution"]["branch"]
-        if haskey(branch, "s_slack") && branch["s_slack"] > 1e-6
-            total_line_slack += branch["s_slack"]
+    
+    if line_limit_relaxation == true
+        for (i, branch) in result["solution"]["branch"]
+            if haskey(branch, "s_slack") && branch["s_slack"] > 1e-6
+                total_line_slack += branch["s_slack"]
+            end
         end
+        println("Total line slack: $(total_line_slack) MVA")
     end
-    println("Total line slack: $(total_line_slack) MVA")
+
+    if opts[:write_output]
+        output_file = "test_scenario_001.h5"
+        write_scenario_to_hdf5(output_file, network, result, 1, total_power_slack, total_line_slack)
+        verify_hdf5_structure(output_file)
+    end
+catch e
+    println("Error during optimization: $INSTANCE with solver $SOLVER")
+    # exit(1)
 end
-
-output_file = "test_scenario_001.h5"
-write_scenario_to_hdf5(output_file, network, result, 1, total_power_slack, total_line_slack)
-
-verify_hdf5_structure(output_file)
-
-
 

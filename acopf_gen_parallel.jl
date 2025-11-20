@@ -2,41 +2,79 @@ using Pkg.Artifacts
 using Distributed
 using ProgressMeter
 using HDF5
+using ArgParse
 
-addprocs(5)
+# Parse CLI options at top-level so we can call addprocs with the requested count
+function parse_cli()
+    s = ArgParseSettings()
+    @add_arg_table s begin
+        "--solver"
+            help = "Solver to use: ipopt, madnlp"
+            arg_type = String
+            default = "madnlp"
+        "--instance"
+            help = "PGLib instance name (without .m)"
+            arg_type = String
+            default = "pglib_opf_case24_ieee_rts"
+        "--nprocs"
+            help = "Number of worker processes to add"
+            arg_type = Int
+            default = 5
+        "--n_scenarios"
+            help = "Total number of scenarios to solve"
+            arg_type = Int
+            default = 10
+        "--chunk_size"
+            help = "Number of scenarios per chunk"
+            arg_type = Int
+            default = 2
+        "--output_dir"
+            help = "Directory to write results into"
+            arg_type = String
+            default = ""
+        "--p_range"
+            help = "Active power perturbation range as a,b"
+            arg_type = String
+            default = "0.9,1.1"
+        "--q_range"
+            help = "Reactive power perturbation range as a,b"
+            arg_type = String
+            default = "0.9,1.1"
+    end
+
+    parsed = parse_args(s)
+
+    opts = Dict{Symbol,Any}()
+    opts[:solver] = Symbol(lowercase(parsed["solver"]))
+    opts[:instance] = parsed["instance"]
+    opts[:nprocs] = parsed["nprocs"]
+    opts[:n_scenarios] = parsed["n_scenarios"]
+    opts[:chunk_size] = parsed["chunk_size"]
+    opts[:output_dir] = parsed["output_dir"]
+    pr = split(parsed["p_range"], ",")
+    opts[:p_range] = (parse(Float64, pr[1]), parse(Float64, pr[2]))
+    qr = split(parsed["q_range"], ",")
+    opts[:q_range] = (parse(Float64, qr[1]), parse(Float64, qr[2]))
+
+    if opts[:output_dir] == ""
+        opts[:output_dir] = joinpath("results", opts[:instance])
+    end
+
+    return opts
+end
+
+opts = parse_cli()
+
+addprocs(opts[:nprocs])
 
 pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
 
-
-# Push configuration and required imports to worker processes
+# Define worker-side functions and imports via @everywhere (top-level)
 @everywhere begin
-
-    # Solver selection: default is :madnlp. Override with ARGS[1] or ENV["OPF_SOLVER"].
-    function _choose_solver(default::Symbol=:madnlp)
-        arg = isempty(ARGS) ? get(ENV, "OPF_SOLVER", "") : ARGS[1]
-        if arg == "" || arg === nothing
-            return default
-        end
-        s = Symbol(lowercase(arg))
-        if s in (:madnlp, :madnlpgpu, :ipopt)
-            return s
-        end
-        error("Unknown solver: $arg. Allowed values: ipopt, madnlp")
-    end
-
-    function _choose_instance(default::String="pglib_opf_case24_ieee_rts")
-        val = length(ARGS) >= 2 ? ARGS[2] : get(ENV, "OPF_INSTANCE", "")
-        return val == "" ? default : String(val)
-    end
-
-    const INSTANCE = _choose_instance("pglib_opf_case24_ieee_rts")
-    const SOLVER = _choose_solver(:madnlp)
-
-    # global INSTANCE = $INSTANCE
-    # global pglib_path = $pglib_path
     using MadNLP
     using MadNLPHSL
     using PowerModels
+    using Ipopt
     using JuMP
     using Random
     using HDF5
@@ -44,7 +82,8 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
     include("perturbations.jl")
     include("hdf5_writer.jl")
 
-    function solve_scenario(base_network, scenario_id, p_range, q_range)
+    # Constants SOLVER/INSTANCE will be set from the main process below
+    function solve_scenario(base_network, scenario_id, p_range, q_range, SOLVER)
         power_balance_relaxation = false
         line_limit_relaxation = false
 
@@ -61,7 +100,7 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
         if SOLVER == :ipopt
             JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
         elseif SOLVER == :madnlp
-            JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.INFO))
+            JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.WARN))
         else
             error("Unsupported solver on worker: $(SOLVER)")
         end
@@ -82,7 +121,7 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
             if SOLVER == :ipopt
                 JuMP.set_optimizer(pm.model, Ipopt.Optimizer)
             elseif SOLVER == :madnlp
-                JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.INFO))
+                JuMP.set_optimizer(pm.model, ()->MadNLP.Optimizer(linear_solver=Ma27Solver, print_level=MadNLP.WARN))
             else
                 error("Unsupported solver on worker: $(SOLVER)")
             end
@@ -124,17 +163,18 @@ pglib_path = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
     end
 end
 
-# Configuration
-case_file = joinpath(pglib_path, "$(INSTANCE).m")
-n_scenarios = 10
-chunk_size = 2
-output_dir = "results/$(INSTANCE)"
-p_range = (0.9, 1.1)
-q_range = (0.9, 1.1)
+# Configuration (use parsed options)
+case_file = joinpath(pglib_path, string(opts[:instance], ".m"))
+n_scenarios = opts[:n_scenarios]
+chunk_size = opts[:chunk_size]
+output_dir = opts[:output_dir]
+p_range = opts[:p_range]
+q_range = opts[:q_range]
 
 mkpath(output_dir)
 
 println("Loading network and distributing to workers...")
+PowerModels.silence()
 base_network = PowerModels.parse_file(case_file)
 @everywhere shared_network = $base_network
 @everywhere p_rng = $p_range
@@ -155,7 +195,8 @@ n_chunks = ceil(Int, n_scenarios / chunk_size)
         continue
     end
     
-    chunk_results = pmap(i -> solve_scenario(shared_network, i, p_rng, q_rng), start_idx:end_idx)
+    # pass SOLVER explicitly to avoid relying on worker-global constants
+    chunk_results = pmap(i -> solve_scenario(shared_network, i, p_rng, q_rng, opts[:solver]), start_idx:end_idx)
 
     successful_results = filter(r -> r != nothing, chunk_results)
 
