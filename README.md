@@ -61,11 +61,15 @@ julia acopf_gen_parallel.jl --solver=ipopt --instance=pglib_opf_case118_ieee --n
   - See [Ipopt.jl's HSL integration guide](https://jump.dev/Ipopt.jl/stable/installation/#hsl)
 - The output per chunk is saved as an HDF5 file containing network data, solver results, objectives, and slack variables information.
 
-## Output
+## Output Data Structure
 
-- Results are stored in HDF5 files under the specified output directory.
-- Each chunk file contains solutions for a subset of scenarios.
-- Logs and progress information are printed during execution.
+Each chunk HDF5 file contains one group per scenario (`scenario_000001`, etc.) plus top-level attributes `n_scenarios` and `chunk_file`. For each scenario:
+- `metadata` attrs: `objective`, `solve_time` (seconds), `status` (MOI status string), `total_power_slack`, `total_line_slack`, `scenario_id`.
+- `grid/context`: dataset `baseMVA` (1x1x1 Float32).
+- `grid/nodes` (Float32 matrices, rows = entities): `bus` `[vmin, vmax, zone, area, bus_type]`; `generator` `[pmax, pmin, qmax, qmin, cost_c2, cost_c1, cost_c0, vg, mbase, status]`; `load` `[pd, qd]`; optional `shunt` `[gs, bs]`.
+- `grid/edges`: `ac_line` senders/receivers (Int32, 0-based bus indices) with features `[angmin, angmax, br_r, br_x, b_fr, b_to, rate_a, rate_b, rate_c, br_status]`; `transformer` senders/receivers with features above plus `[tap, shift]`; `generator_link` (gen id−1 -> gen bus−1); `load_link` (load id−1 -> load bus−1); optional `shunt_link`.
+- `solution/nodes`: `bus` `[va, vm]`; `generator` `[pg, qg]`.
+- `solution/edges`: `ac_line/features` and `transformer/features` `[pf, qf, pt, qt]` ordered consistently with `grid/edges`.
 
 ## Troubleshooting and Notes
 
