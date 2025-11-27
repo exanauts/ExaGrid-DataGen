@@ -11,3 +11,6 @@ MadNLPGPU = "d72a61cc-809d-412f-99be-fd81f4b8a598"
 MadNLPHSL = "7fb6135f-58fe-4112-84ca-653cf5be0c77"
 PowerModels = "c36e90e8-916a-50a6-bd94-075b64ef4655"
 ProgressMeter = "92933f4c-e287-5a05-a399-4b506db050ca"
+
+[sources]
+HSL_jll = {path = "../HSL_jll.jl"}
