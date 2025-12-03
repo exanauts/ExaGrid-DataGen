@@ -33,6 +33,36 @@ Run the main generator script with desired options:
 julia acopf_gen_parallel.jl [OPTIONS]
 ```
 
+### Generate DC OPF datasets
+
+For a linearized DC OPF workflow, use the dedicated scripts:
+
+```sh
+# single scenario (debug)
+julia dcopf_gen.jl --instance=pglib_opf_case24_ieee_rts --write_output=true
+
+# parallel multi-scenario generation
+julia dcopf_gen_parallel.jl --instance=pglib_opf_case118_ieee --nprocs=8 --n_scenarios=50 --chunk_size=5 --output_dir=results_dc/case118
+```
+
+The DC scripts currently support the `ipopt` solver option.
+
+### Generate AC/DC Power Flow datasets
+
+Use the power-flow-specific drivers when you only need feasibility solves (no optimization objective):
+
+```sh
+# AC power flow (single scenario)
+julia acpf_gen.jl --instance=pglib_opf_case24_ieee_rts --write_output=true
+
+# AC power flow (parallel batch)
+julia acpf_gen_parallel.jl --instance=pglib_opf_case118_ieee --nprocs=8 --n_scenarios=50 --chunk_size=5 --output_dir=results_pf/case118
+
+# DC power flow (single/parallel)
+julia dcpf_gen.jl --instance=pglib_opf_case24_ieee_rts --write_output=true
+julia dcpf_gen_parallel.jl --instance=pglib_opf_case118_ieee --nprocs=8 --n_scenarios=50 --chunk_size=5 --output_dir=results_dc_pf/case118
+```
+
 ### Command-Line Arguments
 
 | Argument       | Default Value                  | Description                                                   |
