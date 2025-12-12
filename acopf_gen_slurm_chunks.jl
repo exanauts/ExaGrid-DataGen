@@ -106,6 +106,42 @@ end
 
 checkpoint_path(root::String, inst::String) = joinpath(root, inst, "checkpoint.json")
 
+const LOCK_EX = 2
+const LOCK_UN = 8
+
+function fsync!(io::IO)
+    ret = ccall(:fsync, Cint, (Cint,), Base.fd(io))
+    if ret != 0
+        err = Base.Libc.errno()
+        error("fsync failed (errno=$err)")
+    end
+    return nothing
+end
+
+function flock!(io::IO, op::Integer)
+    fd = Base.fd(io)
+    ret = ccall(:flock, Cint, (Cint, Cint), fd, op)
+    if ret != 0
+        err = Base.Libc.errno()
+        error("flock failed (op=$op, errno=$err)")
+    end
+    return nothing
+end
+
+function with_file_lock(lockfile::String, func::Function)
+    mkpath(dirname(lockfile))
+    open(lockfile, "w") do io
+        flock!(io, LOCK_EX)
+        try
+            return func(io)
+        finally
+            flock!(io, LOCK_UN)
+        end
+    end
+end
+
+with_file_lock(func::Function, lockfile::String) = with_file_lock(lockfile, func)
+
 function load_completed(root::String, inst::String)
     done = Set{Int}()
     inst_dir = joinpath(root, inst)
@@ -135,15 +171,22 @@ end
 function save_checkpoint(root::String, inst::String, completed::Set{Int}, total_chunks::Int)
     ckpt_file = checkpoint_path(root, inst)
     mkpath(dirname(ckpt_file))
-    tmp = ckpt_file * ".tmp"
-    open(tmp, "w") do io
-        JSON.print(io, Dict(
-            "completed_chunks" => collect(completed),
-            "total_chunks" => total_chunks,
-            "updated_at" => Dates.format(Dates.now(), Dates.ISODateTimeFormat)
-        ))
+    lockfile = ckpt_file * ".lock"
+
+    with_file_lock(lockfile) do _
+        @debug "[$inst] Acquired checkpoint lock"
+        merged = union(load_completed(root, inst), completed)
+        mktemp(dirname(ckpt_file)) do tmp, io
+            JSON.print(io, Dict(
+                "completed_chunks" => sort!(collect(merged)),
+                "total_chunks" => total_chunks,
+                "updated_at" => Dates.format(Dates.now(), Dates.ISODateTimeFormat)
+            ))
+            flush(io)
+            fsync!(io)
+            mv(tmp, ckpt_file; force=true)
+        end
     end
-    mv(tmp, ckpt_file; force=true)
 end
 
 opts = parse_cli()
@@ -302,4 +345,3 @@ println("[$inst] Chunk $(chunk_idx+1) complete: wrote $(length(successful_result
 push!(completed, chunk_idx)
 save_checkpoint(opts[:output_dir], inst, completed, total_chunks)
 end
-
