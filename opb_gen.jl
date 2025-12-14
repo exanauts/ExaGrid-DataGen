@@ -3,6 +3,64 @@ using PowerModels
 using HiGHS
 using Ipopt
 using Pkg.Artifacts
+using ArgParse
+using ArgParse: ArgParseSettings, @add_arg_table
+import MathOptInterface
+
+const MOI = MathOptInterface
+
+include("opb_utils.jl")
+include("hdf5_writer.jl")
+
+function parse_cli()
+    positional_case = nothing
+    positional_solver = nothing
+    idx = 1
+    while idx <= length(ARGS) && !startswith(ARGS[idx], "-")
+        if positional_case === nothing
+            positional_case = ARGS[idx]
+        elseif positional_solver === nothing
+            positional_solver = ARGS[idx]
+        else
+            break
+        end
+        idx += 1
+    end
+
+    remaining_argv = idx <= length(ARGS) ? ARGS[idx:end] : String[]
+
+    settings = ArgParseSettings()
+    @add_arg_table settings begin
+        "--instance"
+            help = "PGLib instance name without .m"
+            arg_type = String
+            default = nothing
+        "--solver"
+            help = "Solver to use: highs | ipopt"
+            arg_type = String
+            default = nothing
+        "--write_output"
+            help = "Write OPB solution to an HDF5 file"
+            arg_type = Bool
+            default = false
+        "--output_file"
+            help = "Output HDF5 filename"
+            arg_type = String
+            default = "test_opb_001.h5"
+    end
+
+    parsed = parse_args(remaining_argv, settings)
+
+    instance = something(parsed["instance"], positional_case, "pglib_opf_case24_ieee_rts")
+    solver = lowercase(something(parsed["solver"], positional_solver, "highs"))
+
+    return Dict(
+        :instance => instance,
+        :solver => Symbol(solver),
+        :write_output => parsed["write_output"],
+        :output_file => parsed["output_file"]
+    )
+end
 
 
 # Extract quadratic cost coefficients robustly
@@ -42,9 +100,10 @@ function opb_data_from_network(network)
     loads = haskey(network, "load") ? network["load"] : Dict()
 
     gen_list = Vector{Dict{Symbol,Float64}}()
+    gen_ids = sort(collect(keys(gens)))
 
     # === Extract generator data ===
-    for g in sort(collect(keys(gens)))
+    for g in gen_ids
         ginfo = gens[g]
         cost = ginfo["cost"]
 
@@ -68,13 +127,23 @@ function opb_data_from_network(network)
         total_demand += loadinfo["pd"]      # active demand
     end
 
-    return gen_list, total_demand
+    return gen_list, total_demand, gen_ids
 end
 
-
+function normalize_generator_costs!(network)
+    for (_, gen) in network["gen"]
+        cost = gen["cost"]
+        if cost isa Dict
+            a, b, c = extract_cost_coeffs(cost)
+            gen["cost"] = [a, b, c]
+        end
+    end
+end
 
 # ------------------------------------------------------------
+# ------------------------------------------------------------
 # Build OPB JuMP model (pure ED, no network)
+# NOTE: OPB treats the system as a single demand snapshot without temporal coupling.
 # ------------------------------------------------------------
 function build_opb(gen_data, total_demand)
     m = Model()
@@ -104,17 +173,15 @@ end
 
 # ------------------------------------------------------------
 # Main program
-# Usage example:
-#   julia run_opb.jl pglib_opf_case14_ieee highs
+# Example invocations:
+#   env -u LD_PRELOAD julia --project opb_gen.jl pglib_opf_case14_ieee highs --write_output=true --output_file=results/opb_case14.h5
+#   env -u LD_PRELOAD julia --project opb_gen.jl --instance=pglib_opf_case118_ieee --solver=ipopt --write_output=true --output_file=results/opb_case118.h5
 # ------------------------------------------------------------
 function main()
-    if length(ARGS) < 2
-        println("Usage: julia run_opb.jl <pglib_case_without_dot_m> <solver: highs|ipopt>")
-        return
-    end
+    opts = parse_cli()
 
-    case_name = ARGS[1]
-    solver_name = ARGS[2]
+    case_name = opts[:instance]
+    solver_sym = opts[:solver]
 
     # Locate PGLib artifact
     pglib_root = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
@@ -122,6 +189,7 @@ function main()
 
     # Load MATPOWER case
     network = PowerModels.parse_file(case_path)
+    normalize_generator_costs!(network)
     println("=== DEBUG: GENERATOR COSTS ===")
     for (i, ginfo) in network["gen"]
         println("Gen $i cost = ", ginfo["cost"])
@@ -131,22 +199,8 @@ function main()
         println("Gen $g: pmin=$(ginfo["pmin"]), pmax=$(ginfo["pmax"])")
     end
 
-
-    # println("\n=== DEBUG: GEN KEYS ===")
-    # for (g, ginfo) in network["gen"]
-    #     println("Generator $g keys = ", keys(ginfo))
-    # end
-
-    # println("\n=== DEBUG: BUS KEYS ===")
-    # for (i, businfo) in network["bus"]
-    #     println("Bus $i keys = ", keys(businfo))
-    # end
-
-    # println("\n=== DEBUG: RAW COST FOR GEN 1 ===")
-    # println(network["gen"]["1"]["cost"])
-
     # Extract OPB data
-    gen_data, total_demand = opb_data_from_network(network)
+    gen_data, total_demand, gen_ids = opb_data_from_network(network)
 
     println("\nLoaded case: $case_name")
     println("Generators: $(length(gen_data))")
@@ -156,23 +210,53 @@ function main()
     m = build_opb(gen_data, total_demand)
 
     # Select solver
-    if solver_name == "highs"
+    if solver_sym == :highs
         set_optimizer(m, HiGHS.Optimizer)
-    elseif solver_name == "ipopt"
+    elseif solver_sym == :ipopt
         set_optimizer(m, Ipopt.Optimizer)
     else
-        error("Unknown solver: $solver_name")
+        error("Unknown solver: $solver_sym")
     end
 
-    # Solve
-    optimize!(m)
+    solve_elapsed = @elapsed optimize!(m)
+    status = termination_status(m)
+    objective = objective_value(m)
 
     println("\n=== OPB Solution Results ===")
-    println("Termination status: ", termination_status(m))
-    println("Objective value: ", objective_value(m))
+    println("Termination status: ", status)
+    println("Objective value: ", objective)
     println("Generator outputs (p_g):")
-    for g in 1:length(gen_data)
-        println("  Gen $g: ", value(m[:p][g]))
+
+    gen_solution = Dict{String,Dict{String,Float64}}()
+    gen_vars = m[:p]
+    for (idx, gen_id) in enumerate(gen_ids)
+        pg_val = value(gen_vars[idx])
+        println("  Gen $(gen_id): ", pg_val)
+        gen_solution[string(gen_id)] = Dict("pg" => pg_val, "qg" => 0.0)
+        network["gen"][gen_id]["pg"] = pg_val
+        network["gen"][gen_id]["qg"] = 0.0
+    end
+
+    solve_time_attr = try
+        MOI.get(JuMP.backend(m), MOI.SolveTime())
+    catch
+        nothing
+    end
+
+    solve_time = solve_time_attr isa Real ? float(solve_time_attr) : solve_elapsed
+
+    result = Dict{String,Any}(
+        "objective" => objective,
+        "termination_status" => string(status),
+        "solve_time" => solve_time,
+        "solution" => Dict("gen" => gen_solution)
+    )
+
+    augment_opb_solution!(result, network)
+
+    if opts[:write_output]
+        write_scenario_to_hdf5(opts[:output_file], network, result, 1, 0.0, 0.0)
+        verify_hdf5_structure(opts[:output_file])
     end
 end
 

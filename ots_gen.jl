@@ -7,6 +7,9 @@ using ArgParse: @add_arg_table
 using PowerModels: build_ots, ref_add_on_off_va_bounds!   # import these explicitly
 
 # ---------------- CLI PARSER ----------------
+# Example command:
+#   env -u LD_PRELOAD julia --project ots_gen.jl --instance=pglib_opf_case24_ieee_rts \
+#       --write_output=true --output_file=results/ots_case24.h5
 function parse_cli()
     settings = ArgParseSettings()
     @add_arg_table settings begin
@@ -66,12 +69,14 @@ pglib_root = joinpath(artifact"PGLib_opf", "pglib-opf-23.07")
 case_path = joinpath(pglib_root, string(opts[:instance], ".m"))
 
 include("perturbations.jl")
-# include("hdf5_writer.jl")
+include("hdf5_writer.jl")
 include("powerflow_utils.jl")
 
 PowerModels.silence()
 # ------------------------------------------------------------
 # Remove quadratic terms from generator cost -> MILP (HiGHS-friendly)
+# NOTE: This script produces linear-cost DC-OTS results; do not compare
+#       against AC-OTS or quadratic-cost baselines without restoring cost terms.
 # ------------------------------------------------------------
 function linearize_gen_costs!(network)
     for (id, gen) in network["gen"]
@@ -128,6 +133,10 @@ try
     total_line_slack = 0.0
 
     if opts[:write_output]
+        output_dir = dirname(opts[:output_file])
+        if !isempty(output_dir) && output_dir != "."
+            mkpath(output_dir)
+        end
         write_scenario_to_hdf5(
             opts[:output_file],
             network,

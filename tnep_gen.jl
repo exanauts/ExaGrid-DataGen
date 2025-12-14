@@ -1,5 +1,10 @@
 #!/usr/bin/env julia
 
+# Example command:
+#   env -u LD_PRELOAD julia --project tnep_gen.jl --instance=pglib_opf_case24_ieee_rts \
+#       --line_derate=0.3 --construction_cost=4 --write_output=true \
+#       --output_file=results/tnep_case24_derate0.3_cost4.h5
+
 using Pkg.Artifacts
 using PowerModels
 using JuMP
@@ -7,8 +12,13 @@ using HiGHS
 using ArgParse
 using Random
 
+include("hdf5_writer.jl")
+include("powerflow_utils.jl")
+
 # ------------------------------------------------------------
 # 1) Load perturbation (active & reactive)
+# NOTE: Applies independent multiplicative perturbations per bus; total demand
+#       is not preserved, which is intentional for TNEP stress testing.
 # ------------------------------------------------------------
 function perturb_loads_separate!(network,
                                  p_range::Tuple{Float64,Float64},
@@ -50,6 +60,8 @@ end
 
 # ------------------------------------------------------------
 # 3) Create ne_branch (parallel expansion candidates)
+# NOTE: Models only duplicate capacity along existing corridors, not greenfield
+#       right-of-way selection or alternative topologies.
 # ------------------------------------------------------------
 function add_parallel_ne_branches!(network; construction_cost::Float64 = 10.0)
     ne = Dict{String,Any}()
@@ -103,6 +115,14 @@ function parse_cli()
         "--construction_cost"
             help = "Construction cost per candidate line (e.g. 10.0)"
             default = "10.0"
+        "--write_output"
+            help = "Write solved scenario to an HDF5 file"
+            arg_type = Bool
+            default = false
+        "--output_file"
+            help = "Output HDF5 filename"
+            arg_type = String
+            default = "test_tnep_001.h5"
     end
 
     args = parse_args(settings)
@@ -114,7 +134,9 @@ function parse_cli()
         :q_range           => Tuple(parse.(Float64, split(args["q_range"], ","))),
         :seed              => args["seed"],
         :line_derate       => parse(Float64, args["line_derate"]),
-        :construction_cost => parse(Float64, args["construction_cost"])
+        :construction_cost => parse(Float64, args["construction_cost"]),
+        :write_output      => args["write_output"],
+        :output_file       => args["output_file"]
     )
 end
 
@@ -157,6 +179,8 @@ function main()
 
     println("Solving TNEP...")
     result = optimize_model!(pm)
+    ensure_result_metrics!(result)
+    normalize_dc_solution!(result, network)
 
     println("\n===== TNEP RESULTS =====")
     println("Status     : ", result["termination_status"])
@@ -193,6 +217,22 @@ function main()
         println("    --p_range=1.10,1.20      (higher loads)")
         println("    --line_derate=0.4        (tighter line limits)")
         println("    --construction_cost=3.0  (cheaper lines)")
+    end
+
+    if opts[:write_output]
+        output_dir = dirname(opts[:output_file])
+        if !isempty(output_dir) && output_dir != "."
+            mkpath(output_dir)
+        end
+        write_scenario_to_hdf5(
+            opts[:output_file],
+            network,
+            result,
+            1,
+            0.0,
+            0.0,
+        )
+        verify_hdf5_structure(opts[:output_file])
     end
 
     println("\nDone.")
