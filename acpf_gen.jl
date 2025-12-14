@@ -87,6 +87,6 @@ try
     end
 catch err
     println("Error during AC power flow of $(opts[:instance]) with solver $(opts[:solver])")
-    showerror(stdout, err)
+    showerror(stdout, err, catch_backtrace())
 end
 

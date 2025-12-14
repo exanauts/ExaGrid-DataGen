@@ -2,7 +2,7 @@ using Pkg.Artifacts
 using PowerModels
 using Ipopt
 using JuMP
-using MadNLP, MadNLPHSL, MadNLPGPU
+using MadNLP, MadNLPHSL#, MadNLPGPU
 using ArgParse
 
 # Parse CLI options at top-level so we can call addprocs with the requested count
